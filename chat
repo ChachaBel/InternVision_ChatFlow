@@ -1,0 +1,389 @@
+import 'dart:io';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../auth/presentation/providers/auth_providers.dart';
+
+class ChatPage extends ConsumerStatefulWidget {
+  final String otherUid;
+  final String otherUsername;
+
+  const ChatPage({
+    super.key,
+    required this.otherUid,
+    required this.otherUsername,
+  });
+
+  @override
+  ConsumerState<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends ConsumerState<ChatPage>
+    with SingleTickerProviderStateMixin {
+  final TextEditingController msgController = TextEditingController();
+  final ScrollController scrollController = ScrollController();
+  late AnimationController animController;
+
+  late final String chatId;
+
+  @override
+  void initState() {
+    super.initState();
+
+    animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 250),
+    );
+
+    final myUid = ref.read(authProvider)!.uid;
+    chatId = generateChatId(myUid, widget.otherUid);
+
+    markMessagesAsSeen();
+  }
+
+  @override
+  void dispose() {
+    final myUid = ref.read(authProvider)!.uid;
+    FirebaseFirestore.instance
+        .collection("chats")
+        .doc(chatId)
+        .collection("typing")
+        .doc(myUid)
+        .set({"typing": false});
+
+    msgController.dispose();
+    scrollController.dispose();
+    animController.dispose();
+    super.dispose();
+  }
+
+  String generateChatId(String uid1, String uid2) {
+    final users = [uid1, uid2]..sort();
+    return "${users[0]}_${users[1]}";
+  }
+
+  Future<void> sendMessage() async {
+    final text = msgController.text.trim();
+    if (text.isEmpty) return;
+
+    final myUid = ref.read(authProvider)!.uid;
+
+    FirebaseFirestore.instance
+        .collection("chats")
+        .doc(chatId)
+        .collection("typing")
+        .doc(myUid)
+        .set({"typing": false});
+
+    await FirebaseFirestore.instance
+        .collection("chats")
+        .doc(chatId)
+        .collection("messages")
+        .add({
+      "text": text,
+      "imageUrl": "",
+      "senderId": myUid,
+      "receiverId": widget.otherUid,
+      "timestamp": FieldValue.serverTimestamp(),
+      "seen": false,
+    });
+
+    msgController.clear();
+
+    animController.forward(from: 0.0);
+
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (scrollController.hasClients) {
+        scrollController.animateTo(
+          scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> sendImage() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
+
+    final myUid = ref.read(authProvider)!.uid;
+
+    final storageRef = FirebaseStorage.instance
+        .ref()
+        .child("chat_images/$chatId/${DateTime.now().millisecondsSinceEpoch}.jpg");
+
+    await storageRef.putFile(File(picked.path));
+    final imageUrl = await storageRef.getDownloadURL();
+
+    await FirebaseFirestore.instance
+        .collection("chats")
+        .doc(chatId)
+        .collection("messages")
+        .add({
+      "text": "",
+      "imageUrl": imageUrl,
+      "senderId": myUid,
+      "receiverId": widget.otherUid,
+      "timestamp": FieldValue.serverTimestamp(),
+      "seen": false,
+    });
+
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (scrollController.hasClients) {
+        scrollController.animateTo(
+          scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> markMessagesAsSeen() async {
+    final myUid = ref.read(authProvider)!.uid;
+
+    final unseenMessages = await FirebaseFirestore.instance
+        .collection("chats")
+        .doc(chatId)
+        .collection("messages")
+        .where("receiverId", isEqualTo: myUid)
+        .where("seen", isEqualTo: false)
+        .get();
+
+    for (var m in unseenMessages.docs) {
+      m.reference.update({"seen": true});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final myUid = ref.watch(authProvider)!.uid;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Hero(
+          tag: widget.otherUid,
+          child: Text(widget.otherUsername),
+        ),
+      ),
+      body: Column(
+        children: [
+          // TYPING ANIMATION
+          StreamBuilder(
+            stream: FirebaseFirestore.instance
+                .collection("chats")
+                .doc(chatId)
+                .collection("typing")
+                .doc(widget.otherUid)
+                .snapshots(),
+            builder: (context, snap) {
+              return AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: (snap.hasData &&
+                        snap.data!.exists &&
+                        snap.data!.get("typing") == true)
+                    ? const Padding(
+                        padding: EdgeInsets.only(left: 12, top: 6),
+                        child: Text(
+                          "Typing...",
+                          key: ValueKey("typing"),
+                          style: TextStyle(
+                            color: Colors.grey,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      )
+                    : const SizedBox.shrink(key: ValueKey("notTyping")),
+              );
+            },
+          ),
+
+          // MESSAGES LIST
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection("chats")
+                  .doc(chatId)
+                  .collection("messages")
+                  .orderBy("timestamp", descending: false)
+                  .snapshots(),
+              builder: (context, snap) {
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                final docs = snap.data!.docs;
+
+                return ListView.builder(
+                  controller: scrollController,
+                  padding: const EdgeInsets.all(12),
+                  itemCount: docs.length,
+                  itemBuilder: (context, i) {
+                    final data = docs[i].data() as Map<String, dynamic>;
+                    final isMe = data["senderId"] == myUid;
+                    final seen = data["seen"] ?? false;
+
+                    final timestamp = data["timestamp"] != null
+                        ? (data["timestamp"] as Timestamp).toDate()
+                        : null;
+
+                    final time = timestamp != null
+                        ? "${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}"
+                        : "";
+
+                    return SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0.1, 0.2),
+                        end: Offset.zero,
+                      ).animate(
+                        CurvedAnimation(
+                          parent: animController,
+                          curve: Curves.easeOut,
+                        ),
+                      ),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOut,
+                        margin: const EdgeInsets.symmetric(vertical: 6),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: isMe
+                              ? Colors.blueAccent
+                              : Colors.grey.shade300,
+                          borderRadius: BorderRadius.only(
+                            topLeft: const Radius.circular(16),
+                            topRight: const Radius.circular(16),
+                            bottomLeft:
+                                isMe ? const Radius.circular(16) : const Radius.circular(0),
+                            bottomRight:
+                                isMe ? const Radius.circular(0) : const Radius.circular(16),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: isMe
+                              ? CrossAxisAlignment.end
+                              : CrossAxisAlignment.start,
+                          children: [
+                            // IMAGE
+                            if (data["imageUrl"] != null &&
+                                data["imageUrl"] != "")
+                              AnimatedOpacity(
+                                duration: const Duration(milliseconds: 200),
+                                opacity: 1,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: Image.network(
+                                    data["imageUrl"],
+                                    width: 200,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                              ),
+
+                            if (data["imageUrl"] != null &&
+                                data["imageUrl"] != "")
+                              const SizedBox(height: 5),
+
+                            // MESSAGE TEXT
+                            if (data["text"] != null &&
+                                data["text"].toString().isNotEmpty)
+                              FadeTransition(
+                                opacity: Tween<double>(begin: 0, end: 1)
+                                    .animate(animController),
+                                child: Text(
+                                  data["text"],
+                                  style: TextStyle(
+                                    color: isMe
+                                        ? Colors.white
+                                        : Colors.black87,
+                                  ),
+                                ),
+                              ),
+
+                            const SizedBox(height: 3),
+
+                            // TIME + SEEN
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                AnimatedOpacity(
+                                  duration: const Duration(milliseconds: 200),
+                                  opacity: 0.8,
+                                  child: Text(
+                                    time,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: isMe
+                                          ? Colors.white70
+                                          : Colors.black54,
+                                    ),
+                                  ),
+                                ),
+                                if (isMe) const SizedBox(width: 6),
+                                if (isMe)
+                                  Icon(
+                                    seen ? Icons.done_all : Icons.done,
+                                    size: 17,
+                                    color: seen
+                                        ? Colors.lightBlueAccent
+                                        : Colors.white70,
+                                  ),
+                              ],
+                            )
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+
+          // INPUT BAR
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.image, color: Colors.green),
+                  onPressed: sendImage,
+                ),
+
+                Expanded(
+                  child: TextField(
+                    controller: msgController,
+                    decoration: const InputDecoration(
+                      hintText: "Type a message...",
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (value) {
+                      final myUid = ref.read(authProvider)!.uid;
+                      FirebaseFirestore.instance
+                          .collection("chats")
+                          .doc(chatId)
+                          .collection("typing")
+                          .doc(myUid)
+                          .set({"typing": value.isNotEmpty});
+                    },
+                  ),
+                ),
+
+                const SizedBox(width: 8),
+
+                IconButton(
+                  icon: const Icon(Icons.send, color: Colors.blue),
+                  onPressed: sendMessage,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
