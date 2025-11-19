@@ -1,0 +1,294 @@
+// ignore_for_file: use_build_context_synchronously
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../auth/presentation/providers/auth_providers.dart';
+
+class UsersPage extends ConsumerStatefulWidget {
+  const UsersPage({super.key});
+
+  @override
+  ConsumerState<UsersPage> createState() => _UsersPageState();
+}
+
+class _UsersPageState extends ConsumerState<UsersPage>
+    with SingleTickerProviderStateMixin {
+  String searchText = "";
+
+  late AnimationController animController;
+
+  @override
+  void initState() {
+    super.initState();
+    animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 350),
+    )..forward();
+  }
+
+  @override
+  void dispose() {
+    animController.dispose();
+    super.dispose();
+  }
+
+  // ---------------------------------------------------------
+  // Last Message Text
+  // ---------------------------------------------------------
+  Future<String> getLastMessage(String uid1, String uid2) async {
+    final list = [uid1, uid2]..sort();
+    final chatId = "${list[0]}_${list[1]}";
+
+    final query = await FirebaseFirestore.instance
+        .collection("chats")
+        .doc(chatId)
+        .collection("messages")
+        .orderBy("timestamp", descending: true)
+        .limit(1)
+        .get();
+
+    if (query.docs.isEmpty) return "";
+
+    final data = query.docs.first.data();
+    return data["text"]?.toString() ?? "";
+  }
+
+  // ---------------------------------------------------------
+  // Last Message Time
+  // ---------------------------------------------------------
+  Future<String> getLastMessageTime(String uid1, String uid2) async {
+    final list = [uid1, uid2]..sort();
+    final chatId = "${list[0]}_${list[1]}";
+
+    final query = await FirebaseFirestore.instance
+        .collection("chats")
+        .doc(chatId)
+        .collection("messages")
+        .orderBy("timestamp", descending: true)
+        .limit(1)
+        .get();
+
+    if (query.docs.isEmpty) return "";
+
+    final ts = query.docs.first.data()["timestamp"];
+    if (ts == null) return "";
+
+    final date = ts.toDate();
+    return "${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentUser = ref.watch(authProvider);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("ChatFlow - Users"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.person),
+            onPressed: () {
+              Navigator.pushNamed(context, "/profile");
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () async {
+              final user = ref.read(authProvider);
+              if (user != null) {
+                await FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(user.uid)
+                    .set({
+                  'isOnline': false,
+                  'lastSeen': FieldValue.serverTimestamp(),
+                }, SetOptions(merge: true));
+              }
+
+              await ref.read(authProvider.notifier).logout();
+
+              if (!mounted) return;
+              Navigator.pushReplacementNamed(context, '/login');
+            },
+          ),
+        ],
+      ),
+
+      // ---------------------------------------------------------
+      // BODY
+      // ---------------------------------------------------------
+      body: Column(
+        children: [
+          // SEARCH
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: TextField(
+              decoration: const InputDecoration(
+                hintText: "Search by username...",
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (value) {
+                setState(() => searchText = value.toLowerCase());
+              },
+            ),
+          ),
+
+          Expanded(
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: FirebaseFirestore.instance
+                  .collection('users')
+                  .orderBy('username')
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return const Center(child: Text("Error loading users"));
+                }
+
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                final docs = snapshot.data!.docs;
+
+                if (docs.isEmpty) {
+                  return const Center(child: Text("No users found"));
+                }
+
+                return ListView.builder(
+                  itemCount: docs.length,
+                  itemBuilder: (context, index) {
+                    final data = docs[index].data();
+                    final uid = data['uid'] ?? '';
+                    final username = data['username'] ?? 'Unknown';
+                    final isOnline = data['isOnline'] ?? false;
+
+                    if (currentUser != null && currentUser.uid == uid) {
+                      return const SizedBox.shrink();
+                    }
+
+                    if (searchText.isNotEmpty &&
+                        !username.toLowerCase().contains(searchText)) {
+                      return const SizedBox.shrink();
+                    }
+
+                    // ---------------------------------------------------------
+                    //  ANIMATIONS ON EACH USER TILE
+                    // ---------------------------------------------------------
+                    return SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0.1, 0.1),
+                        end: Offset.zero,
+                      ).animate(CurvedAnimation(
+                        parent: animController,
+                        curve: Interval(
+                          index / docs.length,
+                          1.0,
+                          curve: Curves.easeOut,
+                        ),
+                      )),
+                      child: FadeTransition(
+                        opacity: CurvedAnimation(
+                          parent: animController,
+                          curve: Interval(
+                            0.1,
+                            1.0,
+                            curve: Curves.easeIn,
+                          ),
+                        ),
+                        child: ListTile(
+                          leading: AnimatedOpacity(
+                            duration: const Duration(milliseconds: 300),
+                            opacity: isOnline ? 1 : 0.4,
+                            child: _OnlineDot(isOnline: isOnline),
+                          ),
+
+                          title: Hero(
+                            tag: uid,
+                            child: Text(
+                              username,
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                          ),
+
+                          subtitle: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 250),
+                            child: FutureBuilder(
+                              key: ValueKey(uid),
+                              future:
+                                  getLastMessage(currentUser!.uid, uid),
+                              builder: (context, snap) {
+                                final msg = snap.data?.toString() ?? "";
+                                return Text(
+                                  msg.isEmpty ? "Start chatting" : msg,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                );
+                              },
+                            ),
+                          ),
+
+                          trailing: FutureBuilder(
+                            future: getLastMessageTime(
+                                currentUser.uid, uid),
+                            builder: (context, snap) {
+                              if (!snap.hasData || snap.data == "") {
+                                return const SizedBox();
+                              }
+                              return AnimatedOpacity(
+                                duration:
+                                    const Duration(milliseconds: 250),
+                                opacity: 0.7,
+                                child: Text(
+                                  snap.data.toString(),
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Colors.grey),
+                                ),
+                              );
+                            },
+                          ),
+
+                          onTap: () {
+                            Navigator.pushNamed(
+                              context,
+                              '/chat',
+                              arguments: {
+                                'uid': uid,
+                                'username': username,
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------
+// ONLINE DOT WITH SMOOTH TRANSITION
+// ---------------------------------------------------------
+class _OnlineDot extends StatelessWidget {
+  final bool isOnline;
+  const _OnlineDot({required this.isOnline});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 350),
+      width: 14,
+      height: 14,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: isOnline ? Colors.green : Colors.grey,
+      ),
+    );
+  }
+}
