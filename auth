@@ -1,0 +1,184 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+/// --------------------
+/// USER ENTITY
+/// --------------------
+class AppUser {
+  final String uid;
+  final String email;
+
+  AppUser({
+    required this.uid,
+    required this.email,
+  });
+}
+
+/// --------------------
+/// USER MODEL
+/// --------------------
+class UserModel extends AppUser {
+  UserModel({
+    required super.uid,
+    required super.email,
+  });
+
+  factory UserModel.fromFirebaseUser(User user) {
+    return UserModel(
+      uid: user.uid,
+      email: user.email ?? '',
+    );
+  }
+}
+
+/// --------------------
+/// DATASOURCE (Firebase)
+/// --------------------
+class FirebaseAuthDatasource {
+  final FirebaseAuth auth;
+
+  FirebaseAuthDatasource(this.auth);
+
+  Future<UserModel?> login(String email, String password) async {
+    final result = await auth.signInWithEmailAndPassword(
+      email: email,
+      password: password,
+    );
+
+    final user = result.user;
+    if (user == null) return null;
+
+    return UserModel.fromFirebaseUser(user);
+  }
+
+  Future<UserModel?> register(String email, String password) async {
+    final result = await auth.createUserWithEmailAndPassword(
+      email: email,
+      password: password,
+    );
+
+    final user = result.user;
+    if (user == null) return null;
+
+    return UserModel.fromFirebaseUser(user);
+  }
+
+  UserModel? getCurrentUser() {
+    final user = auth.currentUser;
+    if (user == null) return null;
+    return UserModel.fromFirebaseUser(user);
+  }
+
+  Future<void> logout() async {
+    await auth.signOut();
+  }
+}
+
+/// --------------------
+/// REPOSITORY (ABSTRACT)
+/// --------------------
+abstract class AuthRepository {
+  Future<AppUser?> login(String email, String password);
+  Future<AppUser?> register(String email, String password);
+  AppUser? getCurrentUser();
+  Future<void> logout();
+}
+
+/// --------------------
+/// REPOSITORY IMPLEMENTATION
+/// --------------------
+class AuthRepositoryImpl implements AuthRepository {
+  final FirebaseAuthDatasource datasource;
+
+  AuthRepositoryImpl(this.datasource);
+
+  @override
+  Future<AppUser?> login(String email, String password) {
+    return datasource.login(email, password);
+  }
+
+  @override
+  Future<AppUser?> register(String email, String password) {
+    return datasource.register(email, password);
+  }
+
+  @override
+  AppUser? getCurrentUser() {
+    return datasource.getCurrentUser();
+  }
+
+  @override
+  Future<void> logout() {
+    return datasource.logout();
+  }
+}
+
+/// --------------------
+/// PROVIDERS
+/// --------------------
+
+// Datasource provider
+final authDatasourceProvider = Provider<FirebaseAuthDatasource>((ref) {
+  return FirebaseAuthDatasource(FirebaseAuth.instance);
+});
+
+// Repository provider
+final authRepositoryProvider = Provider<AuthRepository>((ref) {
+  final ds = ref.watch(authDatasourceProvider);
+  return AuthRepositoryImpl(ds);
+});
+
+/// --------------------
+/// STATE NOTIFIER
+/// --------------------
+class AuthNotifier extends StateNotifier<AppUser?> {
+  final AuthRepository repo;
+
+  AuthNotifier(this.repo) : super(null) {
+    state = repo.getCurrentUser();
+  }
+
+  Future<bool> login(String email, String password) async {
+    try {
+      final user = await repo.login(email, password);
+      if (user != null) {
+        state = user;
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> register(String email, String password) async {
+    try {
+      final user = await repo.register(email, password);
+      if (user != null) {
+        state = user;
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void loadUser() {
+    state = repo.getCurrentUser();
+  }
+
+  Future<void> logout() async {
+    await repo.logout();
+    state = null;
+  }
+}
+
+/// --------------------
+/// AUTH PROVIDER (GLOBAL)
+/// --------------------
+final authProvider =
+    StateNotifierProvider<AuthNotifier, AppUser?>((ref) {
+  final repo = ref.watch(authRepositoryProvider);
+  return AuthNotifier(repo);
+});
